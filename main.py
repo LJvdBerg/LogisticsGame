@@ -353,12 +353,20 @@ class Game:
                                 b = self.get_building_at_cell(clicked_cell)
                                 if b is not None:
                                     print(f"Clicked on building: {b.type} at {clicked_cell}")
-                                    if b.type in ("lumber", "quarry", "refinery"):
+                                    if b.type in ("lumber", "quarry"):
+                                        # Lumber and quarry are sources - they produce resources
                                         self.pending_source = clicked_cell
-                                        # Default destination to base for convenience
                                         self.pending_destination = self.base_cell
                                         self.assign_stage = "choose_truck"
-                                        print(f"Starting truck assignment for {b.type}")
+                                        print(f"Starting truck assignment for {b.type} (source)")
+                                        return
+                                    elif b.type == "refinery":
+                                        # Refinery is a destination - it needs stone delivered
+                                        # For refinery, we'll set up a route from base (which has stone) to refinery
+                                        self.pending_source = self.base_cell  # Base has stone
+                                        self.pending_destination = clicked_cell  # Refinery needs stone
+                                        self.assign_stage = "choose_truck"
+                                        print(f"Refinery selected: Base → Refinery route (stone delivery)")
                                         return
                         elif self.assign_stage == "choose_source":
                             # Select source facility
@@ -1035,17 +1043,34 @@ class Game:
         y = panel_rect.y + 12
         btn_w = 140
         btn_h = 36
-        # Determine options from source building type
+        # Determine options from source building type and destination
         options: List[str] = []
         if self.pending_source is not None:
-            b = self.get_building_at_cell(self.pending_source)
-            if b is not None:
-                if b.type == "lumber":
-                    options = ["wood"]
-                elif b.type == "quarry":
+            # Check if this is a base → refinery route
+            if self.pending_source == self.base_cell and self.pending_destination is not None:
+                dest_building = self.get_building_at_cell(self.pending_destination)
+                if dest_building and dest_building.type == "refinery":
+                    # Base → Refinery route: truck picks up stone from base
                     options = ["stone"]
-                elif b.type == "refinery":
-                    options = ["bmats"]
+                else:
+                    # Base → Other: show available resources at base
+                    if self.resources.get("wood", 0) > 0:
+                        options.append("wood")
+                    if self.resources.get("stone", 0) > 0:
+                        options.append("stone")
+                    if self.resources.get("bmats", 0) > 0:
+                        options.append("bmats")
+            else:
+                # Regular source building route
+                b = self.get_building_at_cell(self.pending_source)
+                if b is not None:
+                    if b.type == "lumber":
+                        options = ["wood"]
+                    elif b.type == "quarry":
+                        options = ["stone"]
+                    elif b.type == "refinery":
+                        options = ["bmats"]
+        
         if not options:
             options = ["wood"]
         for opt in options:
@@ -1261,6 +1286,62 @@ class Game:
         
         print(f"Pathfinding: truck at {self.world_pos_to_cell(truck.position_px)} -> start_road={start_cell}, source_road={source_road}, dest_road={dest_road}")
         
+        # Special handling for base → refinery assignments
+        if source == self.base_cell and resource == "stone":
+            # For base → refinery, truck needs to go to base first to load stone
+            if not self.is_cell_in_base_area(truck.current_cell):
+                print(f"Truck {truck.truck_id} not at base, routing to base first to load stone")
+                # Route truck to base first
+                base_road = self.find_nearest_road_to_cell(self.base_cell)
+                if base_road:
+                    path_to_base = self.find_path_on_roads(start_cell, base_road)
+                    if path_to_base:
+                        # Add the base cell so truck can enter it
+                        path_to_base.append(self.base_cell)
+                        truck.path_cells = path_to_base
+                        truck.state = "to_source"
+                        truck.cargo_type = resource
+                        truck.current_cell = start_cell
+                        truck._dest_cell = dest
+                        truck.saved_source = source
+                        truck.saved_dest = dest
+                        truck.saved_resource = resource
+                        truck.refinery_loop = True
+                        print(f"Truck {truck.truck_id} routing to base first to load stone for refinery")
+                        return
+                    else:
+                        print(f"No path to base found for truck {truck.truck_id}")
+                        return
+                else:
+                    print(f"No road to base found")
+                    return
+            else:
+                # Truck is already at base, go directly to refinery
+                print(f"Truck {truck.truck_id} already at base, going directly to refinery")
+                refinery_road = self.find_nearest_road_to_cell(dest)
+                if refinery_road:
+                    path_to_refinery = self.find_path_on_roads(start_cell, refinery_road)
+                    if path_to_refinery:
+                        # Add the refinery cell so truck can enter it
+                        path_to_refinery.append(dest)
+                        truck.path_cells = path_to_refinery
+                        truck.state = "to_dest"  # Going directly to destination
+                        truck.cargo_type = resource
+                        truck.current_cell = start_cell
+                        truck._dest_cell = dest
+                        truck.saved_source = source
+                        truck.saved_dest = dest
+                        truck.saved_resource = resource
+                        truck.refinery_loop = True
+                        print(f"Truck {truck.truck_id} going directly to refinery from base")
+                        return
+                    else:
+                        print(f"No path to refinery found for truck {truck.truck_id}")
+                        return
+                else:
+                    print(f"No road to refinery found")
+                    return
+        
         # Special handling for buildings very close to base
         # If source and dest are close, we need to ensure proper pathfinding
         source_to_base_distance = abs(source[0] - self.base_cell[0]) + abs(source[1] - self.base_cell[1])
@@ -1309,6 +1390,14 @@ class Game:
         truck.saved_source = source
         truck.saved_dest = dest
         truck.saved_resource = resource
+        
+        # Special handling for base → refinery assignments
+        if source == self.base_cell and resource == "stone":
+            # This is a stone delivery from base to refinery - set up the loop
+            dest_building = self.get_building_at_cell(dest)
+            if dest_building and dest_building.type == "refinery":
+                truck.refinery_loop = True
+                print(f"Truck {truck.truck_id} set up for refinery stone delivery loop from base")
         
         # Special handling for refinery assignments
         if resource == "stone" and dest != self.base_cell:
@@ -1503,53 +1592,95 @@ class Game:
                 
                 # Load from source building storage
                 if t.cargo_type == "wood":
-                    b = src_building
-                    amount_available = 0.0
-                    if b and b.type == "lumber":
-                        amount_available = b.storage.get("wood", 0.0)
-                    load_amount = min(5.0, amount_available, t.cargo_capacity - t.cargo_amount)
-                    if load_amount > 0:
-                        t.cargo_amount += load_amount
+                    if src_cell == self.base_cell:
+                        # Loading wood from base
+                        amount_available = self.resources.get("wood", 0)
+                        load_amount = min(5.0, amount_available, t.cargo_capacity - t.cargo_amount)
+                        if load_amount > 0:
+                            t.cargo_amount += load_amount
+                            self.resources["wood"] = max(0, amount_available - load_amount)
+                            print(f"Truck {t.truck_id} loaded {load_amount} wood from base")
+                    else:
+                        # Loading from lumber camp
+                        b = src_building
+                        amount_available = 0.0
                         if b and b.type == "lumber":
-                            b.storage["wood"] = max(0.0, b.storage.get("wood", 0.0) - load_amount)
-                        print(f"Truck {t.truck_id} loaded {load_amount} wood from lumber camp")
+                            amount_available = b.storage.get("wood", 0.0)
+                        load_amount = min(5.0, amount_available, t.cargo_capacity - t.cargo_amount)
+                        if load_amount > 0:
+                            t.cargo_amount += load_amount
+                            if b and b.type == "lumber":
+                                b.storage["wood"] = max(0.0, b.storage.get("wood", 0.0) - load_amount)
+                            print(f"Truck {t.truck_id} loaded {load_amount} wood from lumber camp")
                 elif t.cargo_type == "stone":
-                    b = src_building
-                    amount_available = 0.0
-                    if b and b.type == "quarry":
-                        amount_available = b.storage.get("stone", 0.0)
-                    load_amount = min(5.0, amount_available, t.cargo_capacity - t.cargo_amount)
-                    if load_amount > 0:
-                        t.cargo_amount += load_amount
-                        if b and b.type == "quarry":
-                            b.storage["stone"] = max(0.0, b.storage.get("stone", 0.0) - load_amount)
-                        print(f"Truck {t.truck_id} loaded {load_amount} stone from quarry")
-                        
-                        # If this is a refinery loop, go directly to refinery
-                        if hasattr(t, "refinery_loop") and t.refinery_loop:
+                    if src_cell == self.base_cell:
+                        # Loading stone from base - always try to get 5 stone for refinery delivery
+                        amount_available = self.resources.get("stone", 0)
+                        # For refinery delivery, always try to get 5 stone
+                        target_load = 5.0
+                        load_amount = min(target_load, amount_available, t.cargo_capacity - t.cargo_amount)
+                        if load_amount > 0:
+                            t.cargo_amount += load_amount
+                            self.resources["stone"] = max(0, amount_available - load_amount)
+                            print(f"Truck {t.truck_id} loaded {load_amount} stone from base")
+                            
+                            # If destination is refinery, set up refinery loop
                             dest = getattr(t, "_dest_cell", None)
                             if dest is not None:
-                                # Go directly to refinery with stone
-                                cur_road = self.find_nearest_road_to_cell(t.current_cell) or t.current_cell
-                                dest_road = self.find_nearest_road_to_cell(dest)
-                                if dest_road:
-                                    path2 = self.find_path_on_roads(cur_road, dest_road)
-                                    if path2:
-                                        path2.append(dest)
-                                        t.path_cells = path2
-                                        t.state = "to_dest"
-                                        return
+                                dest_building = self.get_building_at_cell(dest)
+                                if dest_building and dest_building.type == "refinery":
+                                    t.refinery_loop = True
+                                    t.stone_delivered = load_amount  # Track how much stone was delivered
+                                    print(f"Truck {t.truck_id} set up for refinery stone delivery loop")
+                    else:
+                        # Loading from quarry
+                        b = src_building
+                        amount_available = 0.0
+                        if b and b.type == "quarry":
+                            amount_available = b.storage.get("stone", 0.0)
+                        load_amount = min(5.0, amount_available, t.cargo_capacity - t.cargo_amount)
+                        if load_amount > 0:
+                            t.cargo_amount += load_amount
+                            if b and b.type == "quarry":
+                                b.storage["stone"] = max(0.0, b.storage.get("stone", 0.0) - load_amount)
+                            print(f"Truck {t.truck_id} loaded {load_amount} stone from quarry")
+                            
+                            # If this is a refinery loop, go directly to refinery
+                            if hasattr(t, "refinery_loop") and t.refinery_loop:
+                                dest = getattr(t, "_dest_cell", None)
+                                if dest is not None:
+                                    # Go directly to refinery with stone
+                                    cur_road = self.find_nearest_road_to_cell(t.current_cell) or t.current_cell
+                                    dest_road = self.find_nearest_road_to_cell(dest)
+                                    if dest_road:
+                                        path2 = self.find_path_on_roads(cur_road, dest_road)
+                                        if path2:
+                                            path2.append(dest)
+                                            t.path_cells = path2
+                                            t.state = "to_dest"
+                                            print(f"Truck {t.truck_id} heading to refinery with {load_amount} stone")
+                                            return
                 elif t.cargo_type == "bmats":
-                    b = src_building
-                    amount_available = 0.0
-                    if b and b.type == "refinery":
-                        amount_available = b.storage.get("bmats", 0.0)
-                    load_amount = min(5.0, amount_available, t.cargo_capacity - t.cargo_amount)
-                    if load_amount > 0:
-                        t.cargo_amount += load_amount
+                    if src_cell == self.base_cell:
+                        # Loading bmats from base
+                        amount_available = self.resources.get("bmats", 0)
+                        load_amount = min(5.0, amount_available, t.cargo_capacity - t.cargo_amount)
+                        if load_amount > 0:
+                            t.cargo_amount += load_amount
+                            self.resources["bmats"] = max(0, amount_available - load_amount)
+                            print(f"Truck {t.truck_id} loaded {load_amount} bmats from base")
+                    else:
+                        # Loading from refinery
+                        b = src_building
+                        amount_available = 0.0
                         if b and b.type == "refinery":
-                            b.storage["bmats"] = max(0.0, b.storage.get("bmats", 0.0) - load_amount)
-                        print(f"Truck {t.truck_id} loaded {load_amount} bmats from refinery")
+                            amount_available = b.storage.get("bmats", 0.0)
+                        load_amount = min(5.0, amount_available, t.cargo_capacity - t.cargo_amount)
+                        if load_amount > 0:
+                            t.cargo_amount += load_amount
+                            if b and b.type == "refinery":
+                                b.storage["bmats"] = max(0.0, b.storage.get("bmats", 0.0) - load_amount)
+                            print(f"Truck {t.truck_id} loaded {load_amount} bmats from refinery")
                 else:
                     # If cargo type unknown yet, infer from source building
                     if src_building:
@@ -1604,12 +1735,13 @@ class Game:
                 dest_building = self.get_building_at_cell(dest_cell)
                 if dest_building and dest_building.type == "refinery":
                     bmat_available = dest_building.storage.get("bmats", 0.0)
-                    if bmat_available >= 5.0:
-                        # Collect 5 bmats and return to base
+                    waiting_target = getattr(t, "waiting_target", 5.0)  # Default to 5 if not set
+                    if bmat_available >= waiting_target:
+                        # Collect the target amount of bmats and return to base
                         t.cargo_type = "bmats"
-                        t.cargo_amount = 5.0
-                        dest_building.storage["bmats"] = bmat_available - 5.0
-                        print(f"Truck {t.truck_id} collected 5 bmats from refinery")
+                        t.cargo_amount = waiting_target
+                        dest_building.storage["bmats"] = bmat_available - waiting_target
+                        print(f"Truck {t.truck_id} collected {waiting_target} bmats from refinery")
                         
                         # Return to base
                         cur_road = self.find_nearest_road_to_cell(t.current_cell) or t.current_cell
@@ -1639,32 +1771,51 @@ class Game:
                 if dest_cell == self.base_cell:
                     # At base, unload cargo
                     if t.cargo_type in ("wood", "stone", "bmats") and t.cargo_amount > 0:
-                        delivered = int(min(5.0, t.cargo_amount))
+                        delivered = int(t.cargo_amount)  # Deliver all cargo
                         self.resources[t.cargo_type] += delivered
-                        t.cargo_amount -= delivered
+                        t.cargo_amount = 0.0  # Clear cargo completely
                         print(f"Truck {t.truck_id} delivered {delivered} {t.cargo_type} to base")
                 else:
                     # At another building, unload cargo
                     dest_building = self.get_building_at_cell(dest_cell)
                     if dest_building:
                         if t.cargo_type == "stone" and dest_building.type == "refinery" and t.cargo_amount > 0:
-                            # Deliver stone to refinery (max 5 at a time)
-                            delivered = int(min(5.0, t.cargo_amount))
+                            # Deliver all stone to refinery
+                            delivered = int(t.cargo_amount)
                             dest_building.storage["stone"] = dest_building.storage.get("stone", 0.0) + delivered
-                            t.cargo_amount -= delivered
+                            t.cargo_amount = 0.0  # Clear cargo completely
                             print(f"Truck {t.truck_id} delivered {delivered} stone to refinery")
                             
-                            # Now wait for 5 bmats to be produced
-                            if delivered >= 5:
+                            # Now wait for bmats to be produced (wait for the amount of stone delivered)
+                            if delivered > 0:
                                 t.state = "waiting_for_bmats"
                                 t.waiting_timer = 0.0
-                                t.waiting_target = 5  # Wait for 5 bmats
+                                t.waiting_target = delivered  # Wait for the amount of stone delivered
+                                print(f"Truck {t.truck_id} now waiting for {delivered} bmats at refinery")
+                                return
                         elif t.cargo_type in ("wood", "bmats") and t.cargo_amount > 0:
-                            delivered = int(min(5.0, t.cargo_amount))
+                            delivered = int(t.cargo_amount)  # Deliver all cargo
                             # For now, just deliver to base instead of storage buildings
                             self.resources[t.cargo_type] += delivered
-                            t.cargo_amount -= delivered
+                            t.cargo_amount = 0.0  # Clear cargo completely
                             print(f"Truck {t.truck_id} delivered {delivered} {t.cargo_type} to base")
+            else:
+                # Not at destination yet, but check if we need to load stone for refinery delivery
+                if hasattr(t, "refinery_loop") and t.refinery_loop and t.cargo_type == "stone" and t.cargo_amount == 0:
+                    # Truck is going to refinery but has no stone - needs to load from base first
+                    if self.is_cell_in_base_area(t.current_cell):
+                        # We're at base, load stone
+                        amount_available = self.resources.get("stone", 0)
+                        target_load = 5.0  # Always try to get 5 stone for refinery
+                        load_amount = min(target_load, amount_available, t.cargo_capacity - t.cargo_amount)
+                        if load_amount > 0:
+                            t.cargo_amount += load_amount
+                            self.resources["stone"] = max(0, amount_available - load_amount)
+                            print(f"Truck {t.truck_id} loaded {load_amount} stone from base for refinery delivery")
+                        else:
+                            print(f"Truck {t.truck_id} cannot load stone from base (available: {amount_available})")
+                            t.state = "idle"
+                            return
             
             # Repeat or return to idle
             saved_src = getattr(t, "saved_source", None)
