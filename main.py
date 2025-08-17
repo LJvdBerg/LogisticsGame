@@ -1276,12 +1276,95 @@ class Game:
             return
         
         # determine road endpoints near truck, source, dest
+        # Auto-stone pickup for refinery destinations (regardless of how route was set up)
+        dest_building = self.get_building_at_cell(dest)
+        source_building = self.get_building_at_cell(source)
+        
+        # Check if either source OR destination is refinery - we want to set up stone delivery
+        if (dest_building and dest_building.type == "refinery") or (source_building and source_building.type == "refinery"):
+            print(f"=== DEBUG: Refinery route assignment for Truck {truck.truck_id} ===")
+            print(f"DEBUG: Will auto-load 5 stone from base for refinery")
+            print(f"DEBUG: Source: {source}, Destination: {dest}, Resource: {resource}")
+            print(f"DEBUG: Truck current position: {truck.current_cell}")
+            print(f"DEBUG: Base area check: {self.is_cell_in_base_area(truck.current_cell)}")
+            
+            # Force the route to be base → refinery with stone resource
+            print(f"DEBUG: Converting route to base → refinery with stone")
+            
+            # Determine which cell is the refinery
+            if dest_building and dest_building.type == "refinery":
+                refinery_cell = dest
+            elif source_building and source_building.type == "refinery":
+                refinery_cell = source
+            else:
+                print(f"ERROR: No refinery found in route")
+                return
+                
+            # Always set up as base → refinery with stone
+            source = self.base_cell     # Force source to be base
+            dest = refinery_cell        # Force destination to be refinery
+            resource = "stone"          # Force resource to be stone
+            print(f"DEBUG: Corrected route: {source} → {dest} ({resource})")
+            
+            # Check if base has stone available
+            base_stone = self.resources.get("stone", 0)
+            if base_stone >= 5:
+                print(f"DEBUG: Base has {base_stone} stone, will load 5 for refinery")
+                # Always route truck to base first to load stone, then to refinery
+                if not self.is_cell_in_base_area(truck.current_cell):
+                    print(f"DEBUG: Truck {truck.truck_id} routing to base first to load stone")
+                    # Define start_cell here since it's not defined yet
+                    truck_start_cell = self.find_nearest_road_to_cell(self.world_pos_to_cell(truck.position_px))
+                    base_road = self.find_nearest_road_to_cell(self.base_cell)
+                    if base_road:
+                        path_to_base = self.find_path_on_roads(truck_start_cell, base_road)
+                        if path_to_base:
+                            path_to_base.append(self.base_cell)
+                            truck.path_cells = path_to_base
+                            truck.state = "to_source"
+                            truck.cargo_type = "stone"
+                            truck.current_cell = truck_start_cell
+                            truck._dest_cell = dest
+                            truck.saved_source = self.base_cell
+                            truck.saved_dest = dest
+                            truck.saved_resource = "stone"
+                            truck.refinery_loop = True
+                            truck.auto_stone_pickup = True
+                            print(f"DEBUG: Truck {truck.truck_id} routing to base first to load stone for refinery")
+                            return
+                        else:
+                            print(f"ERROR: No path to base found for truck {truck.truck_id}")
+                            return
+                    else:
+                        print(f"ERROR: No road to base found")
+                        return
+                else:
+                    # Truck is already at base, but still need to load stone first
+                    print(f"DEBUG: Truck {truck.truck_id} already at base, but needs to load stone first")
+                    # Route through base loading process even though we're already there
+                    truck.state = "to_source"
+                    truck.cargo_type = "stone"
+                    truck._dest_cell = dest
+                    truck.saved_source = self.base_cell
+                    truck.saved_dest = dest
+                    truck.saved_resource = "stone"
+                    truck.refinery_loop = True
+                    truck.auto_stone_pickup = True
+                    print(f"DEBUG: Truck {truck.truck_id} set to load stone from base, then go to refinery")
+                    return
+            else:
+                print(f"ERROR: Base only has {base_stone} stone, need at least 5 for refinery")
+                return
         start_cell = self.find_nearest_road_to_cell(self.world_pos_to_cell(truck.position_px))
         source_road = self.find_nearest_road_to_cell(source)
         dest_road = self.find_nearest_road_to_cell(dest)
         
+        print(f"=== DEBUG: Normal route assignment ===")
+        print(f"DEBUG: Truck {truck.truck_id} route: {source} -> {dest} ({resource})")
+        print(f"DEBUG: start_cell: {start_cell}, source_road: {source_road}, dest_road: {dest_road}")
+        
         if start_cell is None or source_road is None or dest_road is None:
-            print(f"No path found: start_road={start_cell}, source_road={source_road}, dest_road={dest_road}")
+            print(f"ERROR: No path found: start_road={start_cell}, source_road={source_road}, dest_road={dest_road}")
             return
         
         print(f"Pathfinding: truck at {self.world_pos_to_cell(truck.position_px)} -> start_road={start_cell}, source_road={source_road}, dest_road={dest_road}")
@@ -1545,6 +1628,32 @@ class Game:
             self.update_truck(t, dt)
 
     def update_truck(self, t: Truck, dt: float) -> None:
+        # Add debugging for Truck 2 specifically
+        if t.truck_id == 2:
+            if not hasattr(t, 'debug_timer'):
+                t.debug_timer = 0.0
+            t.debug_timer += dt
+            
+            # Print debug info every 3 seconds for Truck 2
+            if t.debug_timer > 3.0:
+                print(f"=== DEBUG: Truck 2 Status ===")
+                print(f"DEBUG: State: {t.state}")
+                print(f"DEBUG: Position: {t.current_cell}")
+                print(f"DEBUG: Cargo: {t.cargo_type} x{t.cargo_amount}")
+                print(f"DEBUG: Path cells remaining: {len(t.path_cells) if t.path_cells else 0}")
+                print(f"DEBUG: Refinery loop: {getattr(t, 'refinery_loop', False)}")
+                print(f"DEBUG: Auto-stone pickup: {getattr(t, 'auto_stone_pickup', False)}")
+                print(f"DEBUG: Destination: {getattr(t, '_dest_cell', 'None')}")
+                print(f"DEBUG: Saved source: {getattr(t, 'saved_source', 'None')}")
+                print(f"DEBUG: Saved dest: {getattr(t, 'saved_dest', 'None')}")
+                t.debug_timer = 0.0
+        
+        # Check if truck is already at source with no path (needs to load cargo)
+        if t.state == "to_source" and not t.path_cells:
+            print(f"DEBUG: Truck {t.truck_id} is at source with no path, checking for loading")
+            self.on_truck_arrival(t)
+            return
+        
         # Move along path if any
         if t.path_cells:
             # Move towards next cell center
@@ -1563,6 +1672,7 @@ class Game:
                 t.path_cells.pop(0)
                 # If reached end of path, handle arrival state
                 if not t.path_cells:
+                    print(f"DEBUG: Truck {t.truck_id} reached end of path, calling arrival handler")
                     self.on_truck_arrival(t)
             else:
                 ux = vx / dist
@@ -1575,18 +1685,37 @@ class Game:
 
     def on_truck_arrival(self, t: Truck) -> None:
         # Arrived to source or destination depending on state
+        print(f"=== DEBUG: on_truck_arrival called for Truck {t.truck_id} ===")
+        print(f"DEBUG: Truck state: {t.state}")
+        print(f"DEBUG: Current cell: {t.current_cell}")
+        print(f"DEBUG: Cargo: {t.cargo_type} x{t.cargo_amount}")
+        print(f"DEBUG: Auto-stone pickup: {getattr(t, 'auto_stone_pickup', False)}")
+        print(f"DEBUG: Refinery loop: {getattr(t, 'refinery_loop', False)}")
+        
         if t.state == "to_source":
             # Check if we're at the source building (not just close to it)
             src_cell = getattr(t, "saved_source", None)
+            print(f"DEBUG: Saved source cell: {src_cell}")
             if src_cell is None:
+                print(f"ERROR: No saved source cell, setting truck to idle")
                 t.state = "idle"
                 return
                 
             # Check if we're actually at the source building cell
+            print(f"DEBUG: Current cell: {t.current_cell}, Source cell: {src_cell}")
+            print(f"DEBUG: Cell match: {t.current_cell == src_cell}")
+            
             if t.current_cell == src_cell:
+                print(f"DEBUG: Truck is at source cell, loading cargo")
                 # We're at the building, load cargo
                 src_building = self.get_building_at_cell(src_cell)
-                if src_building is None:
+                print(f"DEBUG: Source building: {src_building}")
+                
+                # Special case: base cell doesn't have a building but can still provide resources
+                if src_building is None and src_cell == self.base_cell:
+                    print(f"DEBUG: Source is base cell, proceeding with base resource loading")
+                elif src_building is None:
+                    print(f"ERROR: No source building found and not at base, setting truck to idle")
                     t.state = "idle"
                     return
                 
@@ -1615,13 +1744,24 @@ class Game:
                 elif t.cargo_type == "stone":
                     if src_cell == self.base_cell:
                         # Loading stone from base - always try to get 5 stone for refinery delivery
+                        print(f"=== DEBUG: Truck {t.truck_id} attempting to load stone from base ===")
+                        print(f"DEBUG: Current cell: {t.current_cell}, Base cell: {self.base_cell}")
+                        print(f"DEBUG: Source cell: {src_cell}")
+                        print(f"DEBUG: Auto-stone pickup flag: {getattr(t, 'auto_stone_pickup', False)}")
+                        
                         amount_available = self.resources.get("stone", 0)
                         # For refinery delivery, always try to get 5 stone
                         target_load = 5.0
                         load_amount = min(target_load, amount_available, t.cargo_capacity - t.cargo_amount)
+                        
+                        print(f"DEBUG: Stone available: {amount_available}, Target: {target_load}, Load amount: {load_amount}")
+                        
                         if load_amount > 0:
                             t.cargo_amount += load_amount
                             self.resources["stone"] = max(0, amount_available - load_amount)
+                            print(f"DEBUG: Truck {t.truck_id} loaded {load_amount} stone from base")
+                            print(f"DEBUG: Truck cargo now: {t.cargo_amount}")
+                            print(f"DEBUG: Base stone remaining: {self.resources.get('stone', 0)}")
                             print(f"Truck {t.truck_id} loaded {load_amount} stone from base")
                             
                             # If destination is refinery, set up refinery loop
@@ -1631,7 +1771,41 @@ class Game:
                                 if dest_building and dest_building.type == "refinery":
                                     t.refinery_loop = True
                                     t.stone_delivered = load_amount  # Track how much stone was delivered
-                                    print(f"Truck {t.truck_id} set up for refinery stone delivery loop")
+                                    print(f"DEBUG: Truck {t.truck_id} set up for refinery stone delivery loop")
+                                    print(f"DEBUG: Stone delivered tracking: {t.stone_delivered}")
+                                    
+                                    # If this was auto-stone pickup, go directly to refinery
+                                    if getattr(t, 'auto_stone_pickup', False):
+                                        print(f"=== DEBUG: Auto-stone pickup detected, routing to refinery ===")
+                                        print(f"DEBUG: Truck {t.truck_id} has {load_amount} stone, going to refinery")
+                                        print(f"DEBUG: Destination: {dest}")
+                                        
+                                        # Go directly to refinery with stone
+                                        cur_road = self.find_nearest_road_to_cell(t.current_cell) or t.current_cell
+                                        dest_road = self.find_nearest_road_to_cell(dest)
+                                        print(f"DEBUG: Current road: {cur_road}, Destination road: {dest_road}")
+                                        
+                                        if dest_road:
+                                            path_to_refinery = self.find_path_on_roads(cur_road, dest_road)
+                                            print(f"DEBUG: Path to refinery: {path_to_refinery}")
+                                            if path_to_refinery:
+                                                path_to_refinery.append(dest)
+                                                t.path_cells = path_to_refinery
+                                                t.state = "to_dest"
+                                                print(f"DEBUG: Truck {t.truck_id} heading to refinery with {load_amount} stone")
+                                                print(f"DEBUG: New truck state: {t.state}")
+                                                print(f"DEBUG: Path length: {len(t.path_cells)}")
+                                                return
+                                            else:
+                                                print(f"ERROR: No path to refinery found for auto-stone pickup")
+                                                t.state = "idle"
+                                                return
+                                        else:
+                                            print(f"ERROR: No road to refinery found for auto-stone pickup")
+                                            t.state = "idle"
+                                            return
+                                    else:
+                                        print(f"DEBUG: Normal refinery route, not auto-stone pickup")
                     else:
                         # Loading from quarry
                         b = src_building
@@ -1781,17 +1955,29 @@ class Game:
                     if dest_building:
                         if t.cargo_type == "stone" and dest_building.type == "refinery" and t.cargo_amount > 0:
                             # Deliver all stone to refinery
+                            print(f"=== DEBUG: Truck {t.truck_id} delivering stone to refinery ===")
+                            print(f"DEBUG: Stone cargo amount: {t.cargo_amount}")
+                            print(f"DEBUG: Refinery current stone storage: {dest_building.storage.get('stone', 0.0)}")
+                            print(f"DEBUG: Auto-stone pickup flag: {getattr(t, 'auto_stone_pickup', False)}")
+                            
                             delivered = int(t.cargo_amount)
                             dest_building.storage["stone"] = dest_building.storage.get("stone", 0.0) + delivered
                             t.cargo_amount = 0.0  # Clear cargo completely
-                            print(f"Truck {t.truck_id} delivered {delivered} stone to refinery")
+                            print(f"DEBUG: Truck {t.truck_id} delivered {delivered} stone to refinery")
+                            print(f"DEBUG: Refinery stone storage now: {dest_building.storage.get('stone', 0.0)}")
                             
                             # Now wait for bmats to be produced (wait for the amount of stone delivered)
                             if delivered > 0:
                                 t.state = "waiting_for_bmats"
                                 t.waiting_timer = 0.0
                                 t.waiting_target = delivered  # Wait for the amount of stone delivered
-                                print(f"Truck {t.truck_id} now waiting for {delivered} bmats at refinery")
+                                print(f"DEBUG: Truck {t.truck_id} now waiting for {delivered} bmats at refinery")
+                                print(f"DEBUG: Truck state changed to: {t.state}")
+                                print(f"DEBUG: Waiting target set to: {t.waiting_target}")
+                                return
+                            else:
+                                print(f"ERROR: No stone delivered to refinery")
+                                t.state = "idle"
                                 return
                         elif t.cargo_type in ("wood", "bmats") and t.cargo_amount > 0:
                             delivered = int(t.cargo_amount)  # Deliver all cargo
